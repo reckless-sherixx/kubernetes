@@ -2260,6 +2260,57 @@ device_taint_eviction_controller_pod_deletions_total %d
 //
 // This runs in a bubble (https://pkg.go.dev/testing/synctest), so we can wait for goroutine
 // activity to settle down and then check the state.
+// TestClaimEvictionTimeTolerationEffect checks that the controller interprets
+// a toleration's effect the same way the scheduler does: an empty effect
+// matches all taint effects (see resourceclaim.ToleratesTaint).
+func TestClaimEvictionTimeTolerationEffect(t *testing.T) {
+	tCtx := ktesting.Init(t)
+	tc := setup(tCtx, false)
+	tc.handleSliceChange(nil, sliceTainted)
+	tc.handleSliceChange(nil, slice2)
+
+	tolerationSeconds := int64(tolerationDuration / time.Second)
+	for name, tt := range map[string]struct {
+		toleration   resourceapi.DeviceToleration
+		wantEviction bool
+	}{
+		"NoExecute effect tolerates forever": {
+			toleration: resourceapi.DeviceToleration{Key: taintKey, Operator: resourceapi.DeviceTolerationOpEqual, Value: taintValue, Effect: resourceapi.DeviceTaintEffectNoExecute},
+		},
+		"empty effect tolerates forever": {
+			toleration: resourceapi.DeviceToleration{Key: taintKey, Operator: resourceapi.DeviceTolerationOpEqual, Value: taintValue},
+		},
+		"empty effect with tolerationSeconds delays eviction": {
+			toleration:   resourceapi.DeviceToleration{Key: taintKey, Operator: resourceapi.DeviceTolerationOpEqual, Value: taintValue, TolerationSeconds: &tolerationSeconds},
+			wantEviction: true,
+		},
+		"NoSchedule effect does not tolerate NoExecute": {
+			toleration:   resourceapi.DeviceToleration{Key: taintKey, Operator: resourceapi.DeviceTolerationOpEqual, Value: taintValue, Effect: resourceapi.DeviceTaintEffectNoSchedule},
+			wantEviction: true,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			claim := inUseClaim.DeepCopy()
+			claim.Status.Allocation.Devices.Results[0].Tolerations = []resourceapi.DeviceToleration{tt.toleration}
+			got := tc.claimEvictionTime(claim)
+			if !tt.wantEviction {
+				if got != nil {
+					t.Fatalf("expected the taint to be tolerated, got eviction at %v", got.when)
+				}
+				return
+			}
+			if got == nil {
+				t.Fatalf("expected an eviction, got none")
+			}
+			if tt.toleration.TolerationSeconds != nil {
+				if want := taintTime.Add(tolerationDuration); !got.when.Time.Equal(want) {
+					t.Errorf("expected eviction at %v (taint time plus tolerationSeconds), got %v", want, got.when.Time)
+				}
+			}
+		})
+	}
+}
+
 func TestEviction(t *testing.T) { testEviction(ktesting.Init(t)) }
 func testEviction(tCtx ktesting.TContext) {
 	tCtx.Parallel()
