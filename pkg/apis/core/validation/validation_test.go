@@ -7980,6 +7980,80 @@ func TestRelaxedValidateEnvFrom(t *testing.T) {
 	}
 }
 
+// assertFieldPaths checks that every path in want appears in errs and that no
+// path in unwanted does.
+func assertFieldPaths(t *testing.T, errs field.ErrorList, want, unwanted []string) {
+	t.Helper()
+	got := map[string]int{}
+	for _, err := range errs {
+		got[err.Field]++
+	}
+	for _, path := range want {
+		if got[path] == 0 {
+			t.Errorf("expected an error at %q, got errors: %v", path, errs)
+		}
+	}
+	for _, path := range unwanted {
+		if got[path] > 0 {
+			t.Errorf("unexpected error at %q (index missing from path), got errors: %v", path, errs)
+		}
+	}
+}
+
+func TestValidateVolumeMountsFieldPaths(t *testing.T) {
+	volumes := map[string]core.VolumeSource{"vol": {EmptyDir: &core.EmptyDirVolumeSource{}}}
+	container := &core.Container{} // not privileged, so Bidirectional propagation is invalid
+	propagation := core.MountPropagationBidirectional
+	rro := core.RecursiveReadOnlyEnabled
+	mounts := []core.VolumeMount{
+		{Name: "vol", MountPath: "/ok"},
+		{Name: "vol", MountPath: "/a", SubPath: "../escape"},
+		{Name: "vol", MountPath: "/b", SubPathExpr: "../escape"},
+		{Name: "vol", MountPath: "/c", MountPropagation: &propagation},
+		{Name: "vol", MountPath: "/d", RecursiveReadOnly: &rro}, // readOnly is false
+	}
+
+	errs := ValidateVolumeMounts(mounts, nil, volumes, container, field.NewPath("volumeMounts"), PodValidationOptions{})
+
+	assertFieldPaths(t, errs,
+		[]string{
+			"volumeMounts[1].subPath",
+			"volumeMounts[2].subPathExpr",
+			"volumeMounts[3].mountPropagation",
+			"volumeMounts[4].recursiveReadOnly",
+		},
+		[]string{
+			"volumeMounts.subPath",
+			"volumeMounts.subPathExpr",
+			"volumeMounts.mountPropagation",
+			"volumeMounts.recursiveReadOnly",
+		},
+	)
+}
+
+func TestValidatePodExtendedResourceClaimStatusFieldPaths(t *testing.T) {
+	spec := &core.PodSpec{
+		Containers: []core.Container{{
+			Name:      "c1",
+			Resources: core.ResourceRequirements{Requests: core.ResourceList{"example.com/gpu": resource.MustParse("1")}},
+		}},
+	}
+	status := &core.PodExtendedResourceClaimStatus{
+		ResourceClaimName: "claim",
+		RequestMappings: []core.ContainerExtendedResourceRequest{
+			{ContainerName: "c1", ResourceName: "example.com/gpu", RequestName: "ok"},
+			{ContainerName: "c1", ResourceName: "example.com/gpu", RequestName: "Not_A_DNS_Label"},
+		},
+	}
+
+	errs := validatePodExtendedResourceClaimStatus(status, spec, field.NewPath("status", "extendedResourceClaimStatus"))
+
+	assertFieldPaths(t, errs,
+		[]string{"status.extendedResourceClaimStatus.requestMappings[1].requestName"},
+		[]string{"status.extendedResourceClaimStatus.requestName"},
+	)
+}
+
 func TestValidateVolumeMounts(t *testing.T) {
 	volumes := []core.Volume{
 		{Name: "abc", VolumeSource: core.VolumeSource{PersistentVolumeClaim: &core.PersistentVolumeClaimVolumeSource{ClaimName: "testclaim1"}}},

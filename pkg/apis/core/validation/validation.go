@@ -3212,7 +3212,7 @@ func ValidateVolumeMounts(mounts []core.VolumeMount, voldevices map[string]strin
 		}
 
 		if len(mnt.SubPath) > 0 {
-			allErrs = append(allErrs, validateLocalDescendingPath(mnt.SubPath, fldPath.Child("subPath"))...)
+			allErrs = append(allErrs, validateLocalDescendingPath(mnt.SubPath, idxPath.Child("subPath"))...)
 		}
 
 		if len(mnt.SubPathExpr) > 0 {
@@ -3220,13 +3220,13 @@ func ValidateVolumeMounts(mounts []core.VolumeMount, voldevices map[string]strin
 				allErrs = append(allErrs, field.Invalid(idxPath.Child("subPathExpr"), mnt.SubPathExpr, "subPathExpr and subPath are mutually exclusive"))
 			}
 
-			allErrs = append(allErrs, validateLocalDescendingPath(mnt.SubPathExpr, fldPath.Child("subPathExpr"))...)
+			allErrs = append(allErrs, validateLocalDescendingPath(mnt.SubPathExpr, idxPath.Child("subPathExpr"))...)
 		}
 
 		if mnt.MountPropagation != nil {
-			allErrs = append(allErrs, validateMountPropagation(mnt.MountPropagation, container, fldPath.Child("mountPropagation"))...)
+			allErrs = append(allErrs, validateMountPropagation(mnt.MountPropagation, container, idxPath.Child("mountPropagation"))...)
 		}
-		allErrs = append(allErrs, validateMountRecursiveReadOnly(mnt, fldPath.Child("recursiveReadOnly"))...)
+		allErrs = append(allErrs, validateMountRecursiveReadOnly(mnt, idxPath.Child("recursiveReadOnly"))...)
 		allErrs = append(allErrs, validateBindMountOptions(mnt.BindMountOptions, idxPath.Child("bindMountOptions"))...)
 		if len(mnt.BindMountOptions) > 0 {
 			if vs, ok := volumes[mnt.Name]; ok && vs.Image != nil {
@@ -6441,7 +6441,7 @@ func validatePodExtendedResourceClaimStatus(status *core.PodExtendedResourceClai
 		} else {
 			allErrs = append(allErrs, field.Invalid(idxPath.Child("containerName"), rm.ContainerName, "must match the name of an entry in spec.initContainers.name or spec.containers.name"))
 		}
-		allErrs = append(allErrs, ValidateDNS1123Label(rm.RequestName, fldPath.Child("requestName"))...)
+		allErrs = append(allErrs, ValidateDNS1123Label(rm.RequestName, idxPath.Child("requestName"))...)
 		k := key{container: rm.ContainerName, resource: rm.ResourceName, request: rm.RequestName}
 		if _, ok := seen[k]; ok {
 			allErrs = append(allErrs, field.Duplicate(idxPath.Child("containerName"), rm.ContainerName))
