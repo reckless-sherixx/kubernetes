@@ -650,6 +650,29 @@ func TestBuildNodeAllocatableDRAInfo(t *testing.T) {
 		}
 	}
 
+	withGeneration := func(slice *resourceapi.ResourceSlice, generation int64) *resourceapi.ResourceSlice {
+		slice.Spec.Pool.Generation = generation
+		return slice
+	}
+
+	// An exclusively allocated device (no allowMultipleAllocations) whose
+	// mapping is expressed through a capacity key. The allocator does not
+	// populate consumedCapacity for such devices.
+	cpuDeviceExclusiveCapacity := resourceapi.Device{
+		Name: "cpu0",
+		Capacity: map[resourceapi.QualifiedName]resourceapi.DeviceCapacity{
+			"dra.example.com/cpu": {Value: resource.MustParse("8")},
+		},
+		NodeAllocatableResources: map[v1.ResourceName]resourceapi.NodeAllocatableResource{
+			v1.ResourceCPU: {
+				Mapping: &resourceapi.NodeAllocatableMapping{
+					CapacityKey:        ptr.To(resourceapi.QualifiedName("dra.example.com/cpu")),
+					CapacityMultiplier: new(resource.MustParse("1")),
+				},
+			},
+		},
+	}
+
 	claimNameSpace := "test-ns"
 
 	tests := []struct {
@@ -1297,6 +1320,80 @@ func TestBuildNodeAllocatableDRAInfo(t *testing.T) {
 					Name: v1.ResourceCPU,
 					// Extract quantity correctly from "driver-b.example.com",
 					Quantity: new(resource.MustParse("8")),
+				}},
+			}},
+		},
+		{
+			name:           "capacity key mapping on an exclusively allocated device uses the device capacity",
+			pod:            st.MakePod().Name("test-pod").Namespace(claimNameSpace).UID("test-uid").Containers([]v1.Container{{Name: "c1", Resources: v1.ResourceRequirements{Claims: []v1.ResourceClaim{{Name: "claim1"}}}}}).Obj(),
+			claims:         []*resourceapi.ResourceClaim{makeClaim("claim1", "claim1-uid")},
+			resourceSlices: []*resourceapi.ResourceSlice{makeSlice("slice1", cpuDeviceExclusiveCapacity)},
+			nodeAllocatableClaimAllocations: map[v1.ObjectReference]*resourceapi.AllocationResult{
+				// No consumedCapacity: the allocator only sets it for devices with allowMultipleAllocations.
+				{Name: "claim1", UID: "claim1-uid"}: allocResult("pool1", "cpu0"),
+			},
+			want: []v1.NodeAllocatableResourceClaimStatus{{
+				ResourceClaimName: "claim1",
+				Containers:        []string{"c1"},
+				Mapping: []v1.NodeAllocatableMappedResources{{
+					Name:     v1.ResourceCPU,
+					Quantity: new(resource.MustParse("8")),
+				}},
+			}},
+		},
+		{
+			name: "container referencing two requests of the same claim is listed once",
+			pod: st.MakePod().Name("test-pod").Namespace(claimNameSpace).UID("test-uid").Containers([]v1.Container{{Name: "c1", Resources: v1.ResourceRequirements{Claims: []v1.ResourceClaim{
+				{Name: "claim1", Request: "req1"},
+				{Name: "claim1", Request: "req2"},
+			}}}}).Obj(),
+			claims:         []*resourceapi.ResourceClaim{makeClaim("claim1", "claim1-uid")},
+			resourceSlices: []*resourceapi.ResourceSlice{makeSlice("slice1", combinedDevice)},
+			nodeAllocatableClaimAllocations: map[v1.ObjectReference]*resourceapi.AllocationResult{
+				{Name: "claim1", UID: "claim1-uid"}: allocResult("pool1", "combined-device"),
+			},
+			want: []v1.NodeAllocatableResourceClaimStatus{{
+				ResourceClaimName: "claim1",
+				Containers:        []string{"c1"},
+				Mapping: []v1.NodeAllocatableMappedResources{{
+					Name:     v1.ResourceCPU,
+					Quantity: new(resource.MustParse("2")),
+				}},
+				Overhead: []v1.NodeAllocatableOverheadResources{{
+					Name:         v1.ResourceCPU,
+					PerPod:       new(resource.MustParse("1")),
+					PerContainer: new(resource.MustParse("500m")),
+				}},
+			}},
+		},
+		{
+			name:   "device is taken from the highest pool generation",
+			pod:    st.MakePod().Name("test-pod").Namespace(claimNameSpace).UID("test-uid").Containers([]v1.Container{{Name: "c1", Resources: v1.ResourceRequirements{Claims: []v1.ResourceClaim{{Name: "claim1"}}}}}).Obj(),
+			claims: []*resourceapi.ResourceClaim{makeClaim("claim1", "claim1-uid")},
+			resourceSlices: []*resourceapi.ResourceSlice{
+				// The stale generation is listed first so that a consumer which
+				// ignores the generation picks it up.
+				withGeneration(makeSlice("slice-gen1", cpuDevicePerInstance), 1),
+				withGeneration(makeSlice("slice-gen2", resourceapi.Device{
+					Name: "cpu0",
+					NodeAllocatableResources: map[v1.ResourceName]resourceapi.NodeAllocatableResource{
+						v1.ResourceCPU: {
+							Mapping: &resourceapi.NodeAllocatableMapping{
+								DeviceMultiplier: new(resource.MustParse("4")),
+							},
+						},
+					},
+				}), 2),
+			},
+			nodeAllocatableClaimAllocations: map[v1.ObjectReference]*resourceapi.AllocationResult{
+				{Name: "claim1", UID: "claim1-uid"}: allocResult("pool1", "cpu0"),
+			},
+			want: []v1.NodeAllocatableResourceClaimStatus{{
+				ResourceClaimName: "claim1",
+				Containers:        []string{"c1"},
+				Mapping: []v1.NodeAllocatableMappedResources{{
+					Name:     v1.ResourceCPU,
+					Quantity: new(resource.MustParse("4")),
 				}},
 			}},
 		},

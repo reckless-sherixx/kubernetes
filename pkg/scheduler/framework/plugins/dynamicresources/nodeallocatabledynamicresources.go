@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 
 	v1 "k8s.io/api/core/v1"
@@ -185,8 +186,17 @@ func deviceMatchesNode(device *resourceapi.Device, node *v1.Node) bool {
 }
 
 func getDeviceFromSlices(slices []*resourceapi.ResourceSlice, result *resourceapi.DeviceRequestAllocationResult, node *v1.Node) (*resourceapi.Device, error) {
+	// While a driver rolls out a pool update, slices of the old and the new
+	// generation may coexist. Only slices with the highest generation are
+	// valid, the others are obsolete and must be ignored.
+	var generation int64
 	for _, slice := range slices {
-		if slice.Spec.Driver == result.Driver && slice.Spec.Pool.Name == result.Pool {
+		if slice.Spec.Driver == result.Driver && slice.Spec.Pool.Name == result.Pool && slice.Spec.Pool.Generation > generation {
+			generation = slice.Spec.Pool.Generation
+		}
+	}
+	for _, slice := range slices {
+		if slice.Spec.Driver == result.Driver && slice.Spec.Pool.Name == result.Pool && slice.Spec.Pool.Generation == generation {
 			for i := range slice.Spec.Devices {
 				if slice.Spec.Devices[i].Name == result.Device {
 					device := &slice.Spec.Devices[i]
@@ -207,30 +217,41 @@ func getDeviceFromSlices(slices []*resourceapi.ResourceSlice, result *resourceap
 func addDeviceMapping(
 	resourceName v1.ResourceName,
 	mappingMap *resourceapi.NodeAllocatableMapping,
+	device *resourceapi.Device,
 	result *resourceapi.DeviceRequestAllocationResult,
-	key v1.ObjectReference,
 	totalResources map[v1.ResourceName]resource.Quantity,
-) error {
+) {
 	if mappingMap.CapacityKey != nil && *mappingMap.CapacityKey != "" {
 		capacityKey := *mappingMap.CapacityKey
-		if result.ConsumedCapacity == nil {
-			return fmt.Errorf("claim %s/%s, device %s: ConsumedCapacity is nil, but Capacity key '%s' is set in NodeAllocatableResources for resource %s", key.Namespace, key.Name, result.Device, capacityKey, resourceName)
-		}
-		if consumed, exists := result.ConsumedCapacity[capacityKey]; exists {
-			// If !exists - the capacityKey is not in ConsumedCapacity, this mapping is not relevant for this allocation
-			consumedQuantity := consumed.DeepCopy()
-			quantityOne := resource.MustParse("1")
-			if mappingMap.CapacityMultiplier != nil && !mappingMap.CapacityMultiplier.Equal(quantityOne) {
-				multiplier := mappingMap.CapacityMultiplier.DeepCopy()
-				qDec := consumedQuantity.AsDec()
-				qDec.Mul(qDec, multiplier.AsDec())
-				consumedQuantity = *resource.NewDecimalQuantity(*qDec, consumedQuantity.Format)
+		var base resource.Quantity
+		if result.ConsumedCapacity != nil {
+			consumed, exists := result.ConsumedCapacity[capacityKey]
+			if !exists {
+				// The capacityKey is not in ConsumedCapacity, this mapping is not relevant for this allocation.
+				return
 			}
-			current := totalResources[resourceName]
-			current.Add(consumedQuantity)
-			totalResources[resourceName] = current
+			base = consumed.DeepCopy()
+		} else {
+			// The allocator only reports consumedCapacity for devices that allow
+			// multiple allocations. A device allocated exclusively is consumed in
+			// its entirety, so its declared capacity is the base quantity.
+			capacity, exists := device.Capacity[capacityKey]
+			if !exists {
+				return
+			}
+			base = capacity.Value.DeepCopy()
 		}
-		return nil
+		quantityOne := resource.MustParse("1")
+		if mappingMap.CapacityMultiplier != nil && !mappingMap.CapacityMultiplier.Equal(quantityOne) {
+			multiplier := mappingMap.CapacityMultiplier.DeepCopy()
+			qDec := base.AsDec()
+			qDec.Mul(qDec, multiplier.AsDec())
+			base = *resource.NewDecimalQuantity(*qDec, base.Format)
+		}
+		current := totalResources[resourceName]
+		current.Add(base)
+		totalResources[resourceName] = current
+		return
 	}
 
 	// Note: For the same device, we cannot have both DeviceMultiplier and CapacityKey set (enforced during API validation).
@@ -240,7 +261,6 @@ func addDeviceMapping(
 		current.Add(mappingMap.DeviceMultiplier.DeepCopy())
 		totalResources[resourceName] = current
 	}
-	return nil
 }
 
 // addDeviceOverhead calculates the overhead resources for a device and adds them to the totals map.
@@ -280,7 +300,7 @@ func addDeviceOverhead(
 
 // buildNodeAllocatableDRAInfo processes the node allocatable resource allocations for a pod.
 // It translates the allocated devices and quantities from DRA claims into a list of v1.NodeAllocatableResourceClaimStatus.
-func (pl *DynamicResources) buildNodeAllocatableDRAInfo(pod *v1.Pod, nodeAllocatableClaimAllocations map[v1.ObjectReference]*resourceapi.AllocationResult, claimNametoUID map[string]types.UID, slices []*resourceapi.ResourceSlice, node *v1.Node) ([]v1.NodeAllocatableResourceClaimStatus, error) {
+func (pl *DynamicResources) buildNodeAllocatableDRAInfo(pod *v1.Pod, nodeAllocatableClaimAllocations map[v1.ObjectReference]*resourceapi.AllocationResult, claimNametoUID map[string]types.UID, resourceSlices []*resourceapi.ResourceSlice, node *v1.Node) ([]v1.NodeAllocatableResourceClaimStatus, error) {
 	if len(nodeAllocatableClaimAllocations) == 0 {
 		return []v1.NodeAllocatableResourceClaimStatus{}, nil
 	}
@@ -292,7 +312,7 @@ func (pl *DynamicResources) buildNodeAllocatableDRAInfo(pod *v1.Pod, nodeAllocat
 		totalOverheadResourcesPerClaim := make(map[v1.ResourceName]v1.NodeAllocatableOverheadResources)
 
 		for _, result := range alloc.Devices.Results {
-			device, err := getDeviceFromSlices(slices, &result, node)
+			device, err := getDeviceFromSlices(resourceSlices, &result, node)
 			if err != nil {
 				return nil, fmt.Errorf("claim %s/%s, device %s, driver %s: %w", key.Namespace, key.Name, result.Device, result.Driver, err)
 			}
@@ -302,9 +322,7 @@ func (pl *DynamicResources) buildNodeAllocatableDRAInfo(pod *v1.Pod, nodeAllocat
 
 			for resourceName, resourceMap := range device.NodeAllocatableResources {
 				if resourceMap.Mapping != nil {
-					if err := addDeviceMapping(resourceName, resourceMap.Mapping, &result, key, totalDirectMappedResourcesPerClaim); err != nil {
-						return nil, err
-					}
+					addDeviceMapping(resourceName, resourceMap.Mapping, device, &result, totalDirectMappedResourcesPerClaim)
 				}
 				if resourceMap.Overhead != nil {
 					addDeviceOverhead(resourceName, resourceMap.Overhead, totalOverheadResourcesPerClaim)
@@ -346,6 +364,11 @@ func (pl *DynamicResources) buildNodeAllocatableDRAInfo(pod *v1.Pod, nodeAllocat
 			for _, podClaim := range container.Resources.Claims {
 				if claimUID, ok := claimNametoUID[podClaim.Name]; ok {
 					if nodeAllocatableClaimStatus, ok := claimToStatus[claimUID]; ok {
+						// A container may reference several requests of the same claim;
+						// Containers is a set and per-container overhead is charged once per container.
+						if slices.Contains(nodeAllocatableClaimStatus.Containers, container.Name) {
+							continue
+						}
 						nodeAllocatableClaimStatus.Containers = append(nodeAllocatableClaimStatus.Containers, container.Name)
 						claimToStatus[claimUID] = nodeAllocatableClaimStatus
 					}
