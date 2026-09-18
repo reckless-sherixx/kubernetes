@@ -1957,6 +1957,57 @@ func TestValidationExpressions(t *testing.T) {
 				"isURL('../relative-path') == false",
 			},
 		},
+		{name: "map list keyed by a field name that needs CEL escaping",
+			obj: map[string]interface{}{
+				"refs": []interface{}{
+					map[string]interface{}{"namespace": "a", "name": "x"},
+					map[string]interface{}{"namespace": "b", "name": "x"},
+				},
+			},
+			oldObj: map[string]interface{}{
+				"refs": []interface{}{
+					map[string]interface{}{"namespace": "b", "name": "x"},
+					map[string]interface{}{"namespace": "a", "name": "x"},
+				},
+			},
+			schema: objectTypePtr(map[string]schema.Structural{
+				// "namespace" is a reserved CEL identifier and is escaped to __namespace__.
+				"refs": listMapType([]string{"namespace", "name"}, objectTypePtr(map[string]schema.Structural{
+					"namespace": stringType,
+					"name":      stringType,
+				})),
+			}),
+			valid: []string{
+				"self.refs == self.refs",
+				"self.refs == oldSelf.refs",
+				"self == oldSelf",
+			},
+			errors: map[string]string{
+				"self.refs != oldSelf.refs": "failed rule",
+			},
+		},
+		{name: "objects that differ only in the names of preserved unknown fields are not equal",
+			obj: map[string]interface{}{
+				"config": map[string]interface{}{"a": 1, "x": 1},
+			},
+			oldObj: map[string]interface{}{
+				"config": map[string]interface{}{"a": 1, "y": 1},
+			},
+			schema: objectTypePtr(map[string]schema.Structural{
+				"config": {
+					Generic:    schema.Generic{Type: "object"},
+					Extensions: schema.Extensions{XPreserveUnknownFields: true},
+					Properties: map[string]schema.Structural{"a": integerType},
+				},
+			}),
+			valid: []string{
+				"self.config != oldSelf.config",
+				"self != oldSelf",
+			},
+			errors: map[string]string{
+				"self.config == oldSelf.config": "failed rule",
+			},
+		},
 		{name: "transition rules",
 			obj: map[string]interface{}{
 				"v": "new",

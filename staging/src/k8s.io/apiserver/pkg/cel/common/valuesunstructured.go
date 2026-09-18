@@ -116,7 +116,7 @@ func UnstructuredToVal(unstructured interface{}, schema Schema) ref.Val {
 			switch listType {
 			case "map":
 				mapKeys := schema.XListMapKeys()
-				return &unstructuredMapList{unstructuredList: typedList, escapedKeyProps: escapeKeyProps(mapKeys)}
+				return &unstructuredMapList{unstructuredList: typedList, keyProps: mapKeys, escapedKeyProps: escapeKeyProps(mapKeys)}
 			case "set":
 				return &unstructuredSetList{unstructuredList: typedList}
 			case "atomic":
@@ -240,6 +240,11 @@ func (t *unknownPreserved) Value() interface{} {
 // unstructuredMapList represents an unstructured data instance of an OpenAPI array with x-kubernetes-list-type=map.
 type unstructuredMapList struct {
 	unstructuredList
+	// keyProps are the x-kubernetes-list-map-keys as they appear in the raw
+	// (unescaped) data.
+	keyProps []string
+	// escapedKeyProps are the keyProps as escaped CEL identifiers, for
+	// looking the keys up in ref.Val elements.
 	escapedKeyProps []string
 
 	sync.Once // for for lazy load of mapOfList since it is only needed if Equals is called
@@ -259,6 +264,7 @@ func (t *unstructuredMapList) getMap() map[interface{}]interface{} {
 // toMapKey returns a valid golang map key for the given element of the map list.
 // element must be a valid map list entry where all map key props are scalar types (which are comparable in go
 // and valid for use in a golang map key).
+// The element is raw (unescaped) data, so the key props are looked up by their unescaped names.
 func (t *unstructuredMapList) toMapKey(element interface{}) interface{} {
 	eObj, ok := element.(map[string]interface{})
 	if !ok {
@@ -267,18 +273,18 @@ func (t *unstructuredMapList) toMapKey(element interface{}) interface{} {
 	// Arrays are comparable in go and may be used as map keys, but maps and slices are not.
 	// So we can special case small numbers of key props as arrays and fall back to serialization
 	// for larger numbers of key props
-	if len(t.escapedKeyProps) == 1 {
-		return eObj[t.escapedKeyProps[0]]
+	if len(t.keyProps) == 1 {
+		return eObj[t.keyProps[0]]
 	}
-	if len(t.escapedKeyProps) == 2 {
-		return [2]interface{}{eObj[t.escapedKeyProps[0]], eObj[t.escapedKeyProps[1]]}
+	if len(t.keyProps) == 2 {
+		return [2]interface{}{eObj[t.keyProps[0]], eObj[t.keyProps[1]]}
 	}
-	if len(t.escapedKeyProps) == 3 {
-		return [3]interface{}{eObj[t.escapedKeyProps[0]], eObj[t.escapedKeyProps[1]], eObj[t.escapedKeyProps[2]]}
+	if len(t.keyProps) == 3 {
+		return [3]interface{}{eObj[t.keyProps[0]], eObj[t.keyProps[1]], eObj[t.keyProps[2]]}
 	}
 
-	key := make([]interface{}, len(t.escapedKeyProps))
-	for i, kf := range t.escapedKeyProps {
+	key := make([]interface{}, len(t.keyProps))
+	for i, kf := range t.keyProps {
 		key[i] = eObj[kf]
 	}
 	// Serialize to a string for more than 3 keys. %#v quotes strings.
@@ -615,10 +621,14 @@ func (t *unstructuredMap) Equal(other ref.Val) ref.Val {
 				// The compiler ensures equality is against the same type of object, so this should be unreachable
 				return types.MaybeNoSuchOverloadErr(other)
 			}
-			if oValue, ok := ouMap.value[key]; ok {
-				if !equality.Semantic.DeepEqual(value, oValue) {
-					return types.False
-				}
+			oValue, ok := ouMap.value[key]
+			if !ok {
+				// The key exists on one side only, so the objects differ even
+				// though the sizes matched.
+				return types.False
+			}
+			if !equality.Semantic.DeepEqual(value, oValue) {
+				return types.False
 			}
 		}
 	}

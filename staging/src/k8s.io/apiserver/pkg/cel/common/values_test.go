@@ -1407,8 +1407,7 @@ func TestListAdd(t *testing.T) {
 		{testCase: testCase{
 			name:       "map list equality with escaped key prop ignores element order",
 			expression: "x.ifList == z.ifList",
-		}, // skipUnstructured: unstructuredMapList.Equal looks up escaped key prop names in raw JSON data, where field names are unescaped.
-			skipSchemaless: true, skipUnstructured: true},
+		}, skipSchemaless: true},
 		{testCase: testCase{
 			name:       "serialized map keys distinguish value boundaries on merge",
 			expression: "size(x.wide + y.wide) == 2 && (x.wide + y.wide)[0].value == 1",
